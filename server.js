@@ -26,7 +26,10 @@ let qrCodeBase64 = null;
 let idsAniversariantesEnviadosHoje = []; 
 let idsPosVendaEnviadosHoje = [];
 let dataUltimaVerificacaoJanela = "";
-let tentativasConexao = 0; // 🟢 Trava de segurança contra Loop Infinito
+
+// 🟢 CONTROLES DE SEGURANÇA DO WHATSAPP
+let tentativasConexao = 0; 
+let reconectando = false; 
 
 mongoose.connect(MONGO_URI)
   .then(() => {
@@ -145,14 +148,29 @@ const transporter = nodemailer.createTransport({
 // ==========================================
 app.get('/api/whatsapp/status', (req, res) => res.json({ status: statusConexao, qr: qrCodeBase64 }));
 
+// 🟢 ROTA CORRIGIDA PARA O BOTÃO FUNCIONAR MESMO SE ESTIVER TRAVADO
 app.post('/api/whatsapp/desconectar', async (req, res) => {
-  if (!whatsappClient) return res.status(400).json({ error: 'WhatsApp não está ativo.' });
   try {
-    statusConexao = 'Desconectando...'; await whatsappClient.logout();
-    statusConexao = 'Desconectado'; qrCodeBase64 = null; whatsappClient = null;
-    res.json({ success: true, message: 'Sessão encerrada.' });
+    statusConexao = 'Desconectando...'; 
+    if (whatsappClient) {
+      try { await whatsappClient.logout(); } catch(e) {}
+    }
+    // Força a limpeza absoluta do banco de dados
+    await Configuracao.deleteOne({ chave: 'whatsapp_session_creds' });
+    
+    statusConexao = 'Desconectado'; 
+    qrCodeBase64 = null; 
+    whatsappClient = null;
+    tentativasConexao = 0;
+    reconectando = false;
+    
+    res.json({ success: true, message: 'Sessão encerrada e limpa.' });
+    
+    // Dá o start limpo e seguro novamente
     setTimeout(() => { inicializarWhatsApp(); }, 3000);
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  } catch (error) { 
+    res.status(500).json({ error: error.message }); 
+  }
 });
 
 app.get('/api/whatsapp/mensagens', async (req, res) => {
@@ -417,9 +435,12 @@ app.post('/api/frete', async (req, res) => {
 });
 
 // ==========================================
-// 🤖 MOTOR DO WHATSAPP BLINDADO
+// 🤖 MOTOR DO WHATSAPP BLINDADO CONTRA LOOP
 // ==========================================
 async function inicializarWhatsApp() {
+  if (reconectando) return; // Trava número 1: Impede sobreposição
+  reconectando = true;
+
   try {
     const registroSessao = await Configuracao.findOne({ chave: 'whatsapp_session_creds' });
     let credsCarregadas = null;
@@ -462,18 +483,26 @@ async function inicializarWhatsApp() {
         const foiDeslogado = lastDisconnect?.error?.output?.statusCode === DisconnectReason.loggedOut;
         statusConexao = 'Desconectado'; 
         qrCodeBase64 = null;
+        reconectando = false; // Libera a flag
 
-        // 🟢 SISTEMA ANTI-LOOP
+        // 🟢 TRAVA DE SEGURANÇA MÁXIMA (O MATA-LOOP)
         if (foiDeslogado || tentativasConexao >= 3) { 
           try { await Configuracao.deleteOne({ chave: 'whatsapp_session_creds' }); } catch (e) {} 
           console.log("🧹 Sessão do WhatsApp corrompida. Limpeza automática realizada!");
           tentativasConexao = 0; 
+          statusConexao = 'Erro ao conectar';
+          console.log("⏸️ O bot pausou as tentativas. Use o botão no Painel Zap para reiniciar.");
+          
+          // 🚫 O RETORNO AQUI É A MÁGICA: Ele sai da função e NUNCA MAIS CHAMA o setTimeout
+          return; 
         } 
         
+        // Se falhou 1 ou 2 vezes, tenta normalmente em 5s
         setTimeout(() => inicializarWhatsApp(), 5000);
 
       } else if (connection === 'open') {
         tentativasConexao = 0; 
+        reconectando = false;
         statusConexao = 'Conectado'; 
         qrCodeBase64 = null; 
         console.log('✅ WhatsApp conectado com sucesso!');
@@ -483,6 +512,7 @@ async function inicializarWhatsApp() {
 
     whatsappClient.ev.on('creds.update', async () => { await guardarSessaoNoMongo(); });
   } catch (error) { 
+    reconectando = false;
     statusConexao = 'Erro ao conectar'; 
   }
 }
