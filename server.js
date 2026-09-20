@@ -26,13 +26,14 @@ let qrCodeBase64 = null;
 let idsAniversariantesEnviadosHoje = []; 
 let idsPosVendaEnviadosHoje = [];
 let dataUltimaVerificacaoJanela = "";
+let tentativasConexao = 0; // 🟢 Trava de segurança contra Loop Infinito
 
 mongoose.connect(MONGO_URI)
   .then(() => {
     console.log("✅ Banco MongoDB da Ótica Elos Conectado!");
     atualizarVendasAntigas(); 
     inicializarMensagensPadrao(); 
-    inicializarAdmin(); // 🟢 Cria o primeiro Admin se não existir
+    inicializarAdmin(); 
     inicializarWhatsApp();
   })
   .catch(err => console.error("❌ Erro na conexão:", err));
@@ -41,7 +42,6 @@ mongoose.connect(MONGO_URI)
 // --- MODELOS (SCHEMAS) ---
 // ==========================================
 
-// 🟢 NOVO MODELO: FUNCIONÁRIOS (CONTROLE DE ACESSO)
 const FuncionarioSchema = new mongoose.Schema({
   nome: { type: String, required: true },
   usuario: { type: String, required: true, unique: true },
@@ -102,7 +102,6 @@ const PedidoOnlineSchema = new mongoose.Schema({
 });
 const PedidoOnline = mongoose.model('PedidoOnline', PedidoOnlineSchema);
 
-// 🟢 INTELIGÊNCIA: Cria o dono da loja automaticamente se não houver ninguém
 const inicializarAdmin = async () => {
   try {
     const adminExiste = await Funcionario.findOne({ cargo: 'ADMIN' });
@@ -113,9 +112,9 @@ const inicializarAdmin = async () => {
         senha: '123', 
         cargo: 'ADMIN' 
       }).save();
-      console.log("👤 Usuário Mestre criado com sucesso! (User: admin | Senha: 123)");
+      console.log("👤 Usuário Mestre criado com sucesso!");
     }
-  } catch (err) { console.error("Erro ao criar admin", err); }
+  } catch (err) {}
 };
 
 const atualizarVendasAntigas = async () => {
@@ -142,7 +141,7 @@ const transporter = nodemailer.createTransport({
 });
 
 // ==========================================
-// 🛠️ ROTAS DE CONTROLE DO WHATSAPP
+// 🛠️ ROTAS DE CONTROLE GERAL E API
 // ==========================================
 app.get('/api/whatsapp/status', (req, res) => res.json({ status: statusConexao, qr: qrCodeBase64 }));
 
@@ -169,76 +168,25 @@ app.post('/api/whatsapp/mensagens', async (req, res) => {
   } catch (err) { res.status(500).json({ error: "Erro" }); }
 });
 
-// ==========================================
-// --- ROTAS API: FUNCIONÁRIOS (NOVO) ---
-// ==========================================
-
-// Rota de Login para a equipe
 app.post('/api/funcionarios/login', async (req, res) => {
   try {
     const { usuario, senha } = req.body;
     const func = await Funcionario.findOne({ usuario: usuario.toLowerCase(), senha });
-    
     if (!func) return res.status(401).json({ error: 'Usuário ou senha incorretos.' });
     if (!func.ativo) return res.status(403).json({ error: 'Sua conta foi desativada pelo administrador.' });
-
-    // Retorna os dados seguros do usuário (sem a senha)
     res.json({ id: func._id, nome: func.nome, usuario: func.usuario, cargo: func.cargo });
-  } catch (err) {
-    res.status(500).json({ error: 'Erro no servidor' });
-  }
+  } catch (err) { res.status(500).json({ error: 'Erro no servidor' }); }
 });
 
-// Listar funcionários (Apenas para o Admin)
-app.get('/api/funcionarios', async (req, res) => {
-  try { res.json(await Funcionario.find().select('-senha')); } 
-  catch (err) { res.status(500).json({ error: "Erro ao buscar" }); }
-});
+app.get('/api/funcionarios', async (req, res) => { try { res.json(await Funcionario.find().select('-senha')); } catch (err) { res.status(500).json({ error: "Erro" }); } });
+app.post('/api/funcionarios', async (req, res) => { try { const dados = { ...req.body, usuario: req.body.usuario.toLowerCase() }; const novoFunc = new Funcionario(dados); await novoFunc.save(); res.status(201).json(novoFunc); } catch (err) { if (err.code === 11000) return res.status(400).json({ error: "Este nome de usuário já está em uso." }); res.status(500).json({ error: "Erro" }); } });
+app.put('/api/funcionarios/:id', async (req, res) => { try { if (req.body.usuario) req.body.usuario = req.body.usuario.toLowerCase(); const func = await Funcionario.findByIdAndUpdate(req.params.id, req.body, { new: true }); res.json(func); } catch (err) { res.status(500).json({ error: "Erro" }); } });
+app.delete('/api/funcionarios/:id', async (req, res) => { try { await Funcionario.findByIdAndDelete(req.params.id); res.json({ message: "Excluído." }); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 
-// Criar funcionário
-app.post('/api/funcionarios', async (req, res) => {
-  try { 
-    const dados = { ...req.body, usuario: req.body.usuario.toLowerCase() };
-    const novoFunc = new Funcionario(dados); 
-    await novoFunc.save(); 
-    res.status(201).json(novoFunc); 
-  } catch (err) { 
-    if (err.code === 11000) return res.status(400).json({ error: "Este nome de usuário já está em uso." });
-    res.status(500).json({ error: "Erro ao salvar funcionário" }); 
-  }
-});
-
-// Editar funcionário
-app.put('/api/funcionarios/:id', async (req, res) => {
-  try { 
-    if (req.body.usuario) req.body.usuario = req.body.usuario.toLowerCase();
-    const func = await Funcionario.findByIdAndUpdate(req.params.id, req.body, { new: true }); 
-    res.json(func); 
-  } catch (err) { res.status(500).json({ error: "Erro ao atualizar" }); }
-});
-
-// Excluir funcionário
-app.delete('/api/funcionarios/:id', async (req, res) => {
-  try { await Funcionario.findByIdAndDelete(req.params.id); res.json({ message: "Excluído." }); } 
-  catch (err) { res.status(500).json({ error: "Erro ao deletar" }); }
-});
-
-// ==========================================
-// --- ROTAS API: CUPONS DE DESCONTO ---
-// ==========================================
-app.get('/api/cupons', async (req, res) => {
-  try { res.json(await Cupom.find().sort({ dataFim: -1 })); } 
-  catch (err) { res.status(500).json({ error: "Erro ao buscar cupons" }); }
-});
-app.post('/api/cupons', async (req, res) => {
-  try { const novoCupom = new Cupom(req.body); await novoCupom.save(); res.status(201).json(novoCupom); } catch (err) { if (err.code === 11000) return res.status(400).json({ error: "Já existe um cupom com este código." }); res.status(500).json({ error: "Erro ao salvar cupom" }); }
-});
-app.put('/api/cupons/:id', async (req, res) => {
-  try { const cupomEditado = await Cupom.findByIdAndUpdate(req.params.id, req.body, { new: true }); res.json(cupomEditado); } catch (err) { res.status(500).json({ error: "Erro ao atualizar cupom" }); }
-});
-app.delete('/api/cupons/:id', async (req, res) => {
-  try { await Cupom.findByIdAndDelete(req.params.id); res.json({ message: "Cupom excluído com sucesso." }); } catch (err) { res.status(500).json({ error: "Erro ao deletar cupom" }); }
-});
+app.get('/api/cupons', async (req, res) => { try { res.json(await Cupom.find().sort({ dataFim: -1 })); } catch (err) { res.status(500).json({ error: "Erro" }); } });
+app.post('/api/cupons', async (req, res) => { try { const novoCupom = new Cupom(req.body); await novoCupom.save(); res.status(201).json(novoCupom); } catch (err) { res.status(500).json({ error: "Erro" }); } });
+app.put('/api/cupons/:id', async (req, res) => { try { const cupomEditado = await Cupom.findByIdAndUpdate(req.params.id, req.body, { new: true }); res.json(cupomEditado); } catch (err) { res.status(500).json({ error: "Erro" }); } });
+app.delete('/api/cupons/:id', async (req, res) => { try { await Cupom.findByIdAndDelete(req.params.id); res.json({ message: "Excluído" }); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.get('/api/cupons/validar/:codigo', async (req, res) => {
   try {
     const cupom = await Cupom.findOne({ codigo: req.params.codigo.toUpperCase() });
@@ -246,37 +194,25 @@ app.get('/api/cupons/validar/:codigo', async (req, res) => {
     if (!cupom.ativo) return res.status(400).json({ valido: false, error: "Este cupom está inativo." });
     if (new Date() > new Date(cupom.dataFim)) return res.status(400).json({ valido: false, error: "Este cupom já expirou." });
     res.json({ valido: true, cupom });
-  } catch (err) { res.status(500).json({ error: "Erro ao validar cupom" }); }
+  } catch (err) { res.status(500).json({ error: "Erro" }); }
 });
 
-// ==========================================
-// --- ROTAS API: CLIENTES ---
-// ==========================================
 app.get('/api/clientes', async (req, res) => res.json(await Cliente.find()));
-app.get('/api/clientes/:id', async (req, res) => {
-  try { const cliente = await Cliente.findById(req.params.id); if (!cliente) return res.status(404).json({ error: "Não encontrado" }); res.json(cliente); } 
-  catch (err) { res.status(500).json({ error: "Erro" }); }
-});
+app.get('/api/clientes/:id', async (req, res) => { try { const cliente = await Cliente.findById(req.params.id); if (!cliente) return res.status(404).json({ error: "Não encontrado" }); res.json(cliente); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.post('/api/clientes', async (req, res) => {
   try {
     const novoCliente = new Cliente(req.body);
     await novoCliente.save();
-
-    // Disparo da mensagem de boas-vindas
     if (novoCliente.telefone) {
       let num = novoCliente.telefone.replace(/\D/g, ''); 
       if (!num.startsWith('55')) num = `55${num}`;
       const msg = `Olá, ${novoCliente.nome.split(' ')[0]}! ✨\n\nSeja muito bem-vindo(a) à *Ótica Elos*! Seu cadastro foi realizado com sucesso. Sempre que precisar, este é o nosso canal oficial de atendimento.`;
       validarNumeroWhatsApp(num).then(jid => enviarMensagemTexto(jid, msg)).catch(()=>{});
     }
-
     res.json(novoCliente);
   } catch(e) { res.status(500).json({error: "Erro"}); }
 });
-app.put('/api/clientes/:id', async (req, res) => {
-  try { const clienteAtualizado = await Cliente.findByIdAndUpdate(req.params.id, req.body, { new: true }); if (!clienteAtualizado) return res.status(404).json({ error: "Não encontrado" }); await Venda.updateMany({ cpf: clienteAtualizado.cpf }, { $set: { cliente: clienteAtualizado.nome } }); res.json(clienteAtualizado); } 
-  catch (err) { res.status(500).json({ error: "Erro" }); }
-});
+app.put('/api/clientes/:id', async (req, res) => { try { const clienteAtualizado = await Cliente.findByIdAndUpdate(req.params.id, req.body, { new: true }); if (!clienteAtualizado) return res.status(404).json({ error: "Não encontrado" }); await Venda.updateMany({ cpf: clienteAtualizado.cpf }, { $set: { cliente: clienteAtualizado.nome } }); res.json(clienteAtualizado); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.delete('/api/clientes/:cpf', async (req, res) => { await Cliente.deleteOne({ cpf: req.params.cpf }); res.json({ message: "Removido" }); });
 
 app.post('/api/clientes/solicitar-recuperacao', async (req, res) => {
@@ -324,10 +260,6 @@ app.post('/api/clientes/redefinir-senha', async (req, res) => {
   } catch (err) { res.status(500).json({ error: "Erro ao redefinir." }); }
 });
 
-
-// ==========================================
-// --- ROTAS API: VENDAS, OS, PRODUTOS, DESPESAS ---
-// ==========================================
 app.get('/api/vendas', async (req, res) => {
   try {
     const vendas = await Venda.find().lean();
@@ -338,20 +270,19 @@ app.get('/api/vendas', async (req, res) => {
       return { ...venda, ordensServico: osDestaVenda.map(os => ({ ...os, idOS: os._id.toString() })) };
     });
     res.json(vendasComOS);
-  } catch (err) { res.status(500).json({ error: "Erro ao buscar vendas e OS" }); }
+  } catch (err) { res.status(500).json({ error: "Erro" }); }
 });
-
 app.post('/api/vendas', async (req, res) => { try { const ultimaVenda = await Venda.findOne().sort({ numeroPedido: -1 }); const proximoNumero = ultimaVenda && ultimaVenda.numeroPedido ? ultimaVenda.numeroPedido + 1 : 2000; const novaVenda = new Venda({ ...req.body, numeroPedido: proximoNumero }); res.json(await novaVenda.save()); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.patch('/api/vendas/:id', async (req, res) => { try { res.json(await Venda.findByIdAndUpdate(req.params.id, req.body, { new: true })); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.put('/api/vendas/:id', async (req, res) => { try { res.json(await Venda.findByIdAndUpdate(req.params.id, req.body, { new: true })); } catch (err) { res.status(500).json({ error: "Erro" }); } });
-app.delete('/api/vendas/:id', async (req, res) => { try { await Venda.findByIdAndDelete(req.params.id); res.json({ message: "Venda excluída" }); } catch (err) { res.status(500).json({ error: "Erro" }); } });
+app.delete('/api/vendas/:id', async (req, res) => { try { await Venda.findByIdAndDelete(req.params.id); res.json({ message: "Excluída" }); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 
 app.get('/api/ordens_servico', async (req, res) => res.json(await OrdemServico.find()));
-app.get('/api/ordens_servico/:id', async (req, res) => { try { const os = await OrdemServico.findById(req.params.id); if (!os) return res.status(404).json({ error: "OS não encontrada" }); res.json(os); } catch (err) { res.status(500).json({ error: "Erro" }); } });
+app.get('/api/ordens_servico/:id', async (req, res) => { try { const os = await OrdemServico.findById(req.params.id); if (!os) return res.status(404).json({ error: "Não encontrada" }); res.json(os); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.get('/api/ordens_servico/pedido/:numeroPedido', async (req, res) => { try { const ordens = await OrdemServico.find({ numeroPedido: req.params.numeroPedido }); res.json(ordens); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.post('/api/ordens_servico', async (req, res) => { try { const novaOS = new OrdemServico(req.body); await novaOS.save(); res.status(201).json(novaOS); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.put('/api/ordens_servico/:id', async (req, res) => { try { const osEditada = await OrdemServico.findByIdAndUpdate(req.params.id, req.body, { new: true }); res.json(osEditada); } catch (err) { res.status(500).json({ error: "Erro" }); } });
-app.delete('/api/ordens_servico/:id', async (req, res) => { try { await OrdemServico.findByIdAndDelete(req.params.id); res.json({ message: "OS excluída com sucesso" }); } catch (err) { res.status(500).json({ error: "Erro" }); } });
+app.delete('/api/ordens_servico/:id', async (req, res) => { try { await OrdemServico.findByIdAndDelete(req.params.id); res.json({ message: "Excluída" }); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 
 app.patch('/api/vendas/:id/parcela/:numero', async (req, res) => {
   try {
@@ -405,7 +336,7 @@ app.get('/api/produtos', async (req, res) => {
     const listaProdutos = await Produto.find({}).select('nome preco categoria quantidade referencia foto fotos').lean();
     res.json(listaProdutos);
   } catch (err) {
-    console.error("❌ ERRO GRAVE NA ROTA DE PRODUTOS:", err); res.status(500).json({ error: "Falha ao buscar", detalhes: err.message });
+    res.status(500).json({ error: "Falha ao buscar", detalhes: err.message });
   }
 });
 app.post('/api/produtos', async (req, res) => res.json(await new Produto(req.body).save()));
@@ -447,111 +378,113 @@ app.patch('/api/pedidos_online/:id/status', async (req, res) => {
   } catch (err) { res.status(500).json({ error: "Erro" }); }
 });
 
-// ==========================================
-// --- ROTAS API: CÁLCULO DE FRETE ---
-// ==========================================
 app.post('/api/frete', async (req, res) => {
   try {
     const { cepDestino } = req.body;
-    
-    // O CEP de onde os produtos saem (Bela Vista, Fortaleza-CE)
-    // TROQUE POR SEU CEP REAL DA ÓTICA SE QUISER MAIS PRECISÃO
     const cepOrigem = '60442000'; 
-    
     const cepDestinoLimpo = cepDestino.replace(/\D/g, '');
 
-    if (!cepDestinoLimpo || cepDestinoLimpo.length !== 8) {
-      return res.status(400).json({ error: "CEP de destino inválido." });
-    }
+    if (!cepDestinoLimpo || cepDestinoLimpo.length !== 8) return res.status(400).json({ error: "CEP inválido." });
 
-    // Usaremos a API gratuita da BrasilAPI (Consulta Oficial Correios)
-    // Para pacotes pequenos (Caixa de Óculos: 300g, 16x11x11 cm)
-    
-    // PAC (04510)
     const pacReq = fetch(`https://brasilapi.com.br/api/correios/v1/frete/preco?sCepOrigem=${cepOrigem}&sCepDestino=${cepDestinoLimpo}&nVlPeso=0.3&nCdFormato=1&nVlComprimento=16&nVlAltura=11&nVlLargura=11&nCdServico=04510`);
-    
-    // SEDEX (04014)
     const sedexReq = fetch(`https://brasilapi.com.br/api/correios/v1/frete/preco?sCepOrigem=${cepOrigem}&sCepDestino=${cepDestinoLimpo}&nVlPeso=0.3&nCdFormato=1&nVlComprimento=16&nVlAltura=11&nVlLargura=11&nCdServico=04014`);
 
     const [pacRes, sedexRes] = await Promise.all([pacReq, sedexReq]);
-    
     const opcoes = [];
     
-    // Lógica do Frete Local (Fortaleza e Região)
     const prefixo = cepDestinoLimpo.substring(0, 2);
     if (['60', '61', '62', '63'].includes(prefixo)) {
       opcoes.push({ id: 'retirada', nome: 'Retirar na Loja (Bela Vista)', valor: 0.00, prazo: 'Imediato' });
       opcoes.push({ id: 'motoboy', nome: 'Motoboy Fortaleza/Região', valor: 15.00, prazo: '1 dia útil' });
     }
 
-    // Processa resultado PAC
     if (pacRes.ok) {
       const pacData = await pacRes.json();
-      opcoes.push({ 
-        id: 'pac', 
-        nome: 'Correios PAC', 
-        valor: Number(pacData[0].Valor.replace(',', '.')), 
-        prazo: `${pacData[0].PrazoEntrega} dias úteis` 
-      });
+      opcoes.push({ id: 'pac', nome: 'Correios PAC', valor: Number(pacData[0].Valor.replace(',', '.')), prazo: `${pacData[0].PrazoEntrega} dias úteis` });
     }
-
-    // Processa resultado SEDEX
     if (sedexRes.ok) {
       const sedexData = await sedexRes.json();
-      opcoes.push({ 
-        id: 'sedex', 
-        nome: 'Correios Sedex', 
-        valor: Number(sedexData[0].Valor.replace(',', '.')), 
-        prazo: `${sedexData[0].PrazoEntrega} dias úteis` 
-      });
+      opcoes.push({ id: 'sedex', nome: 'Correios Sedex', valor: Number(sedexData[0].Valor.replace(',', '.')), prazo: `${sedexData[0].PrazoEntrega} dias úteis` });
     }
 
-    // Se as APIs do Correio falharem (estiverem fora do ar), mandamos preços fixos de emergência
     if (opcoes.length === 0 || (opcoes.length === 2 && opcoes[0].id === 'retirada')) {
        opcoes.push({ id: 'pac', nome: 'Correios PAC', valor: 28.90, prazo: '5 a 8 dias úteis' });
        opcoes.push({ id: 'sedex', nome: 'Correios Sedex', valor: 45.50, prazo: '2 a 3 dias úteis' });
     }
 
     res.json(opcoes);
-
-  } catch (error) {
-    console.error("Erro na consulta de frete:", error);
-    res.status(500).json({ error: "Falha ao calcular o frete. Tente novamente." });
-  }
+  } catch (error) { res.status(500).json({ error: "Falha ao calcular." }); }
 });
 
 // ==========================================
-// 🤖 MOTOR DO WHATSAPP
+// 🤖 MOTOR DO WHATSAPP BLINDADO
 // ==========================================
 async function inicializarWhatsApp() {
   try {
     const registroSessao = await Configuracao.findOne({ chave: 'whatsapp_session_creds' });
     let credsCarregadas = null;
-    if (registroSessao && registroSessao.valor) { try { credsCarregadas = JSON.parse(registroSessao.valor, (key, value) => { if (value && value.type === 'Buffer' && Array.isArray(value.data)) { return Buffer.from(value.data); } return value; }); } catch (e) {} }
+    if (registroSessao && registroSessao.valor) { 
+      try { 
+        credsCarregadas = JSON.parse(registroSessao.valor, (key, value) => { 
+          if (value && value.type === 'Buffer' && Array.isArray(value.data)) { return Buffer.from(value.data); } 
+          return value; 
+        }); 
+      } catch (e) {} 
+    }
 
     const { initAuthCreds } = require('@whiskeysockets/baileys');
     const state = { creds: credsCarregadas || initAuthCreds(), keys: { get: () => ({}), set: () => {} } };
 
-    const guardarSessaoNoMongo = async () => { try { const textoSessao = JSON.stringify(state.creds); await Configuracao.updateOne({ chave: 'whatsapp_session_creds' }, { valor: textoSessao }, { upsert: true }); } catch (err) {} };
+    const guardarSessaoNoMongo = async () => { 
+      try { 
+        const textoSessao = JSON.stringify(state.creds); 
+        await Configuracao.updateOne({ chave: 'whatsapp_session_creds' }, { valor: textoSessao }, { upsert: true }); 
+      } catch (err) {} 
+    };
 
-    whatsappClient = makeWASocket({ auth: state, printQRInTerminal: false, keepAliveIntervalMs: 30000, options: { headers: { 'User-Agent': 'Mozilla' } } });
+    whatsappClient = makeWASocket({ 
+      auth: state, 
+      printQRInTerminal: false, 
+      keepAliveIntervalMs: 30000, 
+      options: { headers: { 'User-Agent': 'Mozilla' } } 
+    });
 
     whatsappClient.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
-      if (qr) { statusConexao = 'Aguardando Leitura do QR Code'; try { qrCodeBase64 = await QRCode.toDataURL(qr); } catch (err) {} }
+      
+      if (qr) { 
+        statusConexao = 'Aguardando Leitura do QR Code'; 
+        try { qrCodeBase64 = await QRCode.toDataURL(qr); } catch (err) {} 
+      }
+      
       if (connection === 'close') {
+        tentativasConexao++; 
         const foiDeslogado = lastDisconnect?.error?.output?.statusCode === DisconnectReason.loggedOut;
-        statusConexao = 'Desconectado'; qrCodeBase64 = null;
-        if (foiDeslogado) { try { await Configuracao.deleteOne({ chave: 'whatsapp_session_creds' }); } catch (e) {} setTimeout(() => inicializarWhatsApp(), 2000); } 
-        else { inicializarWhatsApp(); }
+        statusConexao = 'Desconectado'; 
+        qrCodeBase64 = null;
+
+        // 🟢 SISTEMA ANTI-LOOP
+        if (foiDeslogado || tentativasConexao >= 3) { 
+          try { await Configuracao.deleteOne({ chave: 'whatsapp_session_creds' }); } catch (e) {} 
+          console.log("🧹 Sessão do WhatsApp corrompida. Limpeza automática realizada!");
+          tentativasConexao = 0; 
+        } 
+        
+        setTimeout(() => inicializarWhatsApp(), 5000);
+
       } else if (connection === 'open') {
-        statusConexao = 'Conectado'; qrCodeBase64 = null; console.log('✅ WhatsApp conectado com sucesso!');
+        tentativasConexao = 0; 
+        statusConexao = 'Conectado'; 
+        qrCodeBase64 = null; 
+        console.log('✅ WhatsApp conectado com sucesso!');
         setTimeout(() => { verificarAniversariantesDoDia(); verificarPosVendaTrintaDias(); }, 15000);
       }
     });
 
     whatsappClient.ev.on('creds.update', async () => { await guardarSessaoNoMongo(); });
-  } catch (error) { statusConexao = 'Erro ao conectar'; }
+  } catch (error) { 
+    statusConexao = 'Erro ao conectar'; 
+  }
 }
 
 async function enviarMensagemTexto(jid, texto) { if (!whatsappClient) return; await whatsappClient.sendMessage(jid, { text: texto }); }
@@ -605,5 +538,4 @@ async function verificarPosVendaTrintaDias() {
 setInterval(() => { verificarAniversariantesDoDia(); verificarPosVendaTrintaDias(); }, 1000 * 60 * 60);
 
 const PORT = process.env.PORT || 5000;
-
-app.listen(PORT, () => console.log(`🚀 Servidor rodando na porta ${PORT} (Modo Economia de Energia Ativado)`));
+app.listen(PORT, () => console.log(`🚀 Servidor rodando na porta ${PORT} (Modo Economia Ativado)`));
