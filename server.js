@@ -148,14 +148,12 @@ const transporter = nodemailer.createTransport({
 // ==========================================
 app.get('/api/whatsapp/status', (req, res) => res.json({ status: statusConexao, qr: qrCodeBase64 }));
 
-// 🟢 ROTA CORRIGIDA PARA O BOTÃO FUNCIONAR MESMO SE ESTIVER TRAVADO
 app.post('/api/whatsapp/desconectar', async (req, res) => {
   try {
     statusConexao = 'Desconectando...'; 
     if (whatsappClient) {
       try { await whatsappClient.logout(); } catch(e) {}
     }
-    // Força a limpeza absoluta do banco de dados
     await Configuracao.deleteOne({ chave: 'whatsapp_session_creds' });
     
     statusConexao = 'Desconectado'; 
@@ -166,7 +164,6 @@ app.post('/api/whatsapp/desconectar', async (req, res) => {
     
     res.json({ success: true, message: 'Sessão encerrada e limpa.' });
     
-    // Dá o start limpo e seguro novamente
     setTimeout(() => { inicializarWhatsApp(); }, 3000);
   } catch (error) { 
     res.status(500).json({ error: error.message }); 
@@ -280,7 +277,7 @@ app.post('/api/clientes/redefinir-senha', async (req, res) => {
 
 app.get('/api/vendas', async (req, res) => {
   try {
-    const vendas = await Venda.find().lean().sort({ dataVenda: -1 }); // Retorna do mais novo pro mais antigo
+    const vendas = await Venda.find().lean().sort({ dataVenda: -1 }); 
     const ordensServico = await OrdemServico.find().lean();
     const vendasComOS = vendas.map(venda => {
       const identificadorVenda = venda.numeroPedido ? String(venda.numeroPedido) : venda._id.toString();
@@ -295,7 +292,6 @@ app.patch('/api/vendas/:id', async (req, res) => { try { res.json(await Venda.fi
 app.put('/api/vendas/:id', async (req, res) => { try { res.json(await Venda.findByIdAndUpdate(req.params.id, req.body, { new: true })); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.delete('/api/vendas/:id', async (req, res) => { try { await Venda.findByIdAndDelete(req.params.id); res.json({ message: "Excluída" }); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 
-// 🟢 ROTAS DE ORDEM DE SERVIÇO OTIMIZADAS PARA O REACT QUERY
 app.get('/api/ordens_servico', async (req, res) => res.json(await OrdemServico.find().sort({ _id: -1 })));
 app.get('/api/ordens_servico/:id', async (req, res) => { try { const os = await OrdemServico.findById(req.params.id); if (!os) return res.status(404).json({ error: "Não encontrada" }); res.json(os); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.get('/api/ordens_servico/pedido/:numeroPedido', async (req, res) => { try { const ordens = await OrdemServico.find({ numeroPedido: req.params.numeroPedido }); res.json(ordens); } catch (err) { res.status(500).json({ error: "Erro" }); } });
@@ -303,47 +299,101 @@ app.post('/api/ordens_servico', async (req, res) => { try { const novaOS = new O
 app.put('/api/ordens_servico/:id', async (req, res) => { try { const osEditada = await OrdemServico.findByIdAndUpdate(req.params.id, req.body, { new: true }); res.json(osEditada); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.delete('/api/ordens_servico/:id', async (req, res) => { try { await OrdemServico.findByIdAndDelete(req.params.id); res.json({ message: "Excluída" }); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 
+
+// =========================================================================
+// 🟢 ROTA DE PARCELAS BLINDADA (Correção do Erro 500 no Estorno)
+// =========================================================================
 app.patch('/api/vendas/:id/parcela/:numero', async (req, res) => {
   try {
-    const { id, numero } = req.params; const { paga, dataPagamento, valorPago } = req.body;
+    const { id, numero } = req.params; 
+    const { paga, dataPagamento, valorPago } = req.body;
+    
     const venda = await Venda.findById(id);
     if (!venda) return res.status(404).json({ error: "Venda não encontrada" });
-    const numAtual = parseFloat(numero); let novasParcelas = JSON.parse(JSON.stringify(venda.listaParcelas || []));
+    
+    const numAtual = parseFloat(numero); 
+    let novasParcelas = JSON.parse(JSON.stringify(venda.listaParcelas || []));
     const index = novasParcelas.findIndex(p => String(p.numero) === String(numAtual));
+    
     if (index === -1) return res.status(404).json({ error: "Parcela não encontrada" });
 
     if (paga === false) {
-      const proximoNumero = numAtual + 0.5; const parcelaFilhaIndex = novasParcelas.findIndex(p => String(p.numero) === String(proximoNumero));
+      // ESTORNO: Se havia uma sub-parcela fracionada criada por um pagamento menor, junta de volta
+      const proximoNumero = numAtual + 0.5; 
+      const parcelaFilhaIndex = novasParcelas.findIndex(p => String(p.numero) === String(proximoNumero));
+      
       if (parcelaFilhaIndex !== -1 && !Number.isInteger(proximoNumero)) {
         const somaRecomposta = Number(novasParcelas[index].valor) + Number(novasParcelas[parcelaFilhaIndex].valor);
-        novasParcelas[index].valor = parseFloat(somaRecomposta.toFixed(2)); novasParcelas.splice(parcelaFilhaIndex, 1); i--; 
+        novasParcelas[index].valor = parseFloat(somaRecomposta.toFixed(2)); 
+        novasParcelas.splice(parcelaFilhaIndex, 1); 
+        // 🔴 AQUI estava o bug do i-- (removido!)
       }
-      novasParcelas[index].paga = false; novasParcelas[index].dataPagamento = null;
+      
+      novasParcelas[index].paga = false; 
+      novasParcelas[index].dataPagamento = null;
+      
     } else {
+      // DAR BAIXA: Matemática de adiantamento e excedente segura
       let valorInformado = parseFloat(Number(valorPago || novasParcelas[index].valor).toFixed(2));
       let valorOriginalDaParcela = parseFloat(Number(novasParcelas[index].valor).toFixed(2));
       const diferenca = parseFloat((valorInformado - valorOriginalDaParcela).toFixed(2));
 
-      if (diferenca > 0) {
+      if (diferenca > 0) { // Pagou a Mais
         let excesso = diferenca;
+        novasParcelas[index].valor = valorInformado; 
+        
         for (let i = index + 1; i < novasParcelas.length; i++) {
-          if (excesso <= 0) break; if (novasParcelas[i].paga) continue;
+          if (excesso <= 0) break; 
+          if (novasParcelas[i].paga) continue;
+          
           let valorDaProxima = parseFloat(Number(novasParcelas[i].valor).toFixed(2));
-          if (excesso >= valorDaProxima) { novasParcelas[index].valor = parseFloat((Number(novasParcelas[index].valor) + valorDaProxima).toFixed(2)); excesso = parseFloat((excesso - valorDaProxima).toFixed(2)); novasParcelas.splice(i, 1); i--; } 
-          else { novasParcelas[i].valor = parseFloat((valorDaProxima - excesso).toFixed(2)); novasParcelas[index].valor = parseFloat((Number(novasParcelas[index].valor) + excesso).toFixed(2)); excesso = 0; }
+          if (excesso >= valorDaProxima) { 
+            excesso = parseFloat((excesso - valorDaProxima).toFixed(2)); 
+            novasParcelas.splice(i, 1); 
+            i--; // Neste contexto o i-- é seguro, pois estamos num laço FOR
+          } else { 
+            novasParcelas[i].valor = parseFloat((valorDaProxima - excesso).toFixed(2)); 
+            excesso = 0; 
+          }
         }
-        novasParcelas[index].paga = true; novasParcelas[index].dataPagamento = dataPagamento;
-      } else if (diferenca < 0) {
+        
+        novasParcelas[index].paga = true; 
+        novasParcelas[index].dataPagamento = dataPagamento;
+        
+      } else if (diferenca < 0) { // Pagou a Menos
         const valorSobra = Math.abs(diferenca);
-        novasParcelas[index].valor = valorInformado; novasParcelas[index].paga = true; novasParcelas[index].dataPagamento = dataPagamento;
-        novasParcelas.push({ ...novasParcelas[index], numero: numAtual + 0.5, valor: valorSobra, paga: false, dataPagamento: null, observacao: `Restante da parc. ${numAtual}` });
-      } else {
-        novasParcelas[index].valor = valorInformado; novasParcelas[index].paga = true; novasParcelas[index].dataPagamento = dataPagamento;
+        novasParcelas[index].valor = valorInformado; 
+        novasParcelas[index].paga = true; 
+        novasParcelas[index].dataPagamento = dataPagamento;
+        
+        novasParcelas.push({ 
+            ...novasParcelas[index], 
+            numero: numAtual + 0.5, 
+            valor: valorSobra, 
+            paga: false, 
+            dataPagamento: null, 
+            observacao: `Restante da parc. ${numAtual}` 
+        });
+        
+      } else { // Pagou o valor Exato
+        novasParcelas[index].valor = valorInformado; 
+        novasParcelas[index].paga = true; 
+        novasParcelas[index].dataPagamento = dataPagamento;
       }
     }
-    novasParcelas.sort((a, b) => a.numero - b.numero); venda.listaParcelas = novasParcelas; venda.markModified('listaParcelas'); await venda.save(); res.json(venda);
-  } catch (err) { res.status(500).json({ error: "Erro" }); }
+    
+    novasParcelas.sort((a, b) => a.numero - b.numero); 
+    venda.listaParcelas = novasParcelas; 
+    venda.markModified('listaParcelas'); 
+    await venda.save(); 
+    
+    res.json(venda);
+  } catch (err) { 
+    console.error("Erro no patch de parcelas:", err);
+    res.status(500).json({ error: "Erro interno no servidor." }); 
+  }
 });
+
 
 app.get('/api/despesas', async (req, res) => res.json(await Despesa.find().sort({ vencimento: -1 })));
 app.post('/api/despesas', async (req, res) => res.json(await new Despesa(req.body).save()));
