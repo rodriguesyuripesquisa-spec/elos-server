@@ -215,7 +215,7 @@ app.get('/api/cupons/validar/:codigo', async (req, res) => {
   } catch (err) { res.status(500).json({ error: "Erro" }); }
 });
 
-app.get('/api/clientes', async (req, res) => res.json(await Cliente.find()));
+app.get('/api/clientes', async (req, res) => res.json(await Cliente.find().sort({ nome: 1 })));
 app.get('/api/clientes/:id', async (req, res) => { try { const cliente = await Cliente.findById(req.params.id); if (!cliente) return res.status(404).json({ error: "Não encontrado" }); res.json(cliente); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.post('/api/clientes', async (req, res) => {
   try {
@@ -280,7 +280,7 @@ app.post('/api/clientes/redefinir-senha', async (req, res) => {
 
 app.get('/api/vendas', async (req, res) => {
   try {
-    const vendas = await Venda.find().lean();
+    const vendas = await Venda.find().lean().sort({ dataVenda: -1 }); // Retorna do mais novo pro mais antigo
     const ordensServico = await OrdemServico.find().lean();
     const vendasComOS = vendas.map(venda => {
       const identificadorVenda = venda.numeroPedido ? String(venda.numeroPedido) : venda._id.toString();
@@ -295,7 +295,8 @@ app.patch('/api/vendas/:id', async (req, res) => { try { res.json(await Venda.fi
 app.put('/api/vendas/:id', async (req, res) => { try { res.json(await Venda.findByIdAndUpdate(req.params.id, req.body, { new: true })); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.delete('/api/vendas/:id', async (req, res) => { try { await Venda.findByIdAndDelete(req.params.id); res.json({ message: "Excluída" }); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 
-app.get('/api/ordens_servico', async (req, res) => res.json(await OrdemServico.find()));
+// 🟢 ROTAS DE ORDEM DE SERVIÇO OTIMIZADAS PARA O REACT QUERY
+app.get('/api/ordens_servico', async (req, res) => res.json(await OrdemServico.find().sort({ _id: -1 })));
 app.get('/api/ordens_servico/:id', async (req, res) => { try { const os = await OrdemServico.findById(req.params.id); if (!os) return res.status(404).json({ error: "Não encontrada" }); res.json(os); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.get('/api/ordens_servico/pedido/:numeroPedido', async (req, res) => { try { const ordens = await OrdemServico.find({ numeroPedido: req.params.numeroPedido }); res.json(ordens); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.post('/api/ordens_servico', async (req, res) => { try { const novaOS = new OrdemServico(req.body); await novaOS.save(); res.status(201).json(novaOS); } catch (err) { res.status(500).json({ error: "Erro" }); } });
@@ -344,14 +345,14 @@ app.patch('/api/vendas/:id/parcela/:numero', async (req, res) => {
   } catch (err) { res.status(500).json({ error: "Erro" }); }
 });
 
-app.get('/api/despesas', async (req, res) => res.json(await Despesa.find()));
+app.get('/api/despesas', async (req, res) => res.json(await Despesa.find().sort({ vencimento: -1 })));
 app.post('/api/despesas', async (req, res) => res.json(await new Despesa(req.body).save()));
 app.patch('/api/despesas/:id', async (req, res) => { try { res.json(await Despesa.findByIdAndUpdate(req.params.id, req.body, { new: true })); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.delete('/api/despesas/:id', async (req, res) => { try { await Despesa.findByIdAndDelete(req.params.id); res.json({ message: "Excluída" }); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 
 app.get('/api/produtos', async (req, res) => {
   try {
-    const listaProdutos = await Produto.find({}).select('nome preco categoria quantidade referencia foto fotos').lean();
+    const listaProdutos = await Produto.find({}).select('nome preco categoria quantidade referencia foto fotos').lean().sort({ nome: 1 });
     res.json(listaProdutos);
   } catch (err) {
     res.status(500).json({ error: "Falha ao buscar", detalhes: err.message });
@@ -483,9 +484,8 @@ async function inicializarWhatsApp() {
         const foiDeslogado = lastDisconnect?.error?.output?.statusCode === DisconnectReason.loggedOut;
         statusConexao = 'Desconectado'; 
         qrCodeBase64 = null;
-        reconectando = false; // Libera a flag
+        reconectando = false; 
 
-        // 🟢 TRAVA DE SEGURANÇA MÁXIMA (O MATA-LOOP)
         if (foiDeslogado || tentativasConexao >= 3) { 
           try { await Configuracao.deleteOne({ chave: 'whatsapp_session_creds' }); } catch (e) {} 
           console.log("🧹 Sessão do WhatsApp corrompida. Limpeza automática realizada!");
@@ -493,11 +493,9 @@ async function inicializarWhatsApp() {
           statusConexao = 'Erro ao conectar';
           console.log("⏸️ O bot pausou as tentativas. Use o botão no Painel Zap para reiniciar.");
           
-          // 🚫 O RETORNO AQUI É A MÁGICA: Ele sai da função e NUNCA MAIS CHAMA o setTimeout
           return; 
         } 
         
-        // Se falhou 1 ou 2 vezes, tenta normalmente em 5s
         setTimeout(() => inicializarWhatsApp(), 5000);
 
       } else if (connection === 'open') {
