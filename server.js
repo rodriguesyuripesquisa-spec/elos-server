@@ -31,13 +31,23 @@ let dataUltimaVerificacaoJanela = "";
 let tentativasConexao = 0; 
 let reconectando = false; 
 
+// ============================================================
+// ✅ CORREÇÃO: Boot do Express em paralelo, WhatsApp em background
+// ============================================================
 mongoose.connect(MONGO_URI)
   .then(() => {
     console.log("✅ Banco MongoDB da Ótica Elos Conectado!");
-    atualizarVendasAntigas(); 
-    inicializarMensagensPadrao(); 
-    inicializarAdmin(); 
-    inicializarWhatsApp();
+    // Tarefas leves em background, sem bloquear
+    atualizarVendasAntigas().catch(e => console.error('erro atualizarVendas:', e));
+    inicializarMensagensPadrao().catch(e => console.error('erro msgs:', e));
+    inicializarAdmin().catch(e => console.error('erro admin:', e));
+
+    // ✅ WhatsApp só inicia 60s depois, para não competir com o boot HTTP
+    console.log("⏳ WhatsApp será iniciado em 60s (background)...");
+    setTimeout(() => {
+      console.log("🤖 Iniciando WhatsApp em background...");
+      inicializarWhatsApp().catch(e => console.error('erro whatsapp:', e));
+    }, 60000);
   })
   .catch(err => console.error("❌ Erro na conexão:", err));
 
@@ -164,9 +174,24 @@ app.post('/api/whatsapp/desconectar', async (req, res) => {
     
     res.json({ success: true, message: 'Sessão encerrada e limpa.' });
     
-    setTimeout(() => { inicializarWhatsApp(); }, 3000);
+    // ✅ CORREÇÃO: forçar reconexão (true) para gerar novo QR Code
+    setTimeout(() => { inicializarWhatsApp(true); }, 3000);
   } catch (error) { 
     res.status(500).json({ error: error.message }); 
+  }
+});
+
+// ✅ CORREÇÃO: Nova rota para o usuário pedir conexão manualmente (gerar QR Code)
+app.post('/api/whatsapp/conectar', async (req, res) => {
+  try {
+    statusConexao = 'Iniciando...';
+    qrCodeBase64 = null;
+    tentativasConexao = 0;
+    reconectando = false;
+    res.json({ success: true, message: 'Iniciando conexão...' });
+    setTimeout(() => { inicializarWhatsApp(true).catch(e => console.error(e)); }, 1000);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -214,19 +239,24 @@ app.get('/api/cupons/validar/:codigo', async (req, res) => {
 
 app.get('/api/clientes', async (req, res) => res.json(await Cliente.find().sort({ nome: 1 })));
 app.get('/api/clientes/:id', async (req, res) => { try { const cliente = await Cliente.findById(req.params.id); if (!cliente) return res.status(404).json({ error: "Não encontrado" }); res.json(cliente); } catch (err) { res.status(500).json({ error: "Erro" }); } });
+
 app.post('/api/clientes', async (req, res) => {
   try {
     const novoCliente = new Cliente(req.body);
     await novoCliente.save();
+    // ✅ CORREÇÃO: WhatsApp fire-and-forget, não bloqueia a resposta HTTP
     if (novoCliente.telefone) {
       let num = novoCliente.telefone.replace(/\D/g, ''); 
       if (!num.startsWith('55')) num = `55${num}`;
       const msg = `Olá, ${novoCliente.nome.split(' ')[0]}! ✨\n\nSeja muito bem-vindo(a) à *Ótica Elos*! Seu cadastro foi realizado com sucesso. Sempre que precisar, este é o nosso canal oficial de atendimento.`;
-      validarNumeroWhatsApp(num).then(jid => enviarMensagemTexto(jid, msg)).catch(()=>{});
+      validarNumeroWhatsApp(num)
+        .then(jid => enviarMensagemTexto(jid, msg))
+        .catch(() => {});
     }
     res.json(novoCliente);
   } catch(e) { res.status(500).json({error: "Erro"}); }
 });
+
 app.put('/api/clientes/:id', async (req, res) => { try { const clienteAtualizado = await Cliente.findByIdAndUpdate(req.params.id, req.body, { new: true }); if (!clienteAtualizado) return res.status(404).json({ error: "Não encontrado" }); await Venda.updateMany({ cpf: clienteAtualizado.cpf }, { $set: { cliente: clienteAtualizado.nome } }); res.json(clienteAtualizado); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.delete('/api/clientes/:cpf', async (req, res) => { await Cliente.deleteOne({ cpf: req.params.cpf }); res.json({ message: "Removido" }); });
 
@@ -318,7 +348,6 @@ app.patch('/api/vendas/:id/parcela/:numero', async (req, res) => {
     if (index === -1) return res.status(404).json({ error: "Parcela não encontrada" });
 
     if (paga === false) {
-      // ESTORNO: Se havia uma sub-parcela fracionada criada por um pagamento menor, junta de volta
       const proximoNumero = numAtual + 0.5; 
       const parcelaFilhaIndex = novasParcelas.findIndex(p => String(p.numero) === String(proximoNumero));
       
@@ -326,19 +355,17 @@ app.patch('/api/vendas/:id/parcela/:numero', async (req, res) => {
         const somaRecomposta = Number(novasParcelas[index].valor) + Number(novasParcelas[parcelaFilhaIndex].valor);
         novasParcelas[index].valor = parseFloat(somaRecomposta.toFixed(2)); 
         novasParcelas.splice(parcelaFilhaIndex, 1); 
-        // 🔴 AQUI estava o bug do i-- (removido!)
       }
       
       novasParcelas[index].paga = false; 
       novasParcelas[index].dataPagamento = null;
       
     } else {
-      // DAR BAIXA: Matemática de adiantamento e excedente segura
       let valorInformado = parseFloat(Number(valorPago || novasParcelas[index].valor).toFixed(2));
       let valorOriginalDaParcela = parseFloat(Number(novasParcelas[index].valor).toFixed(2));
       const diferenca = parseFloat((valorInformado - valorOriginalDaParcela).toFixed(2));
 
-      if (diferenca > 0) { // Pagou a Mais
+      if (diferenca > 0) {
         let excesso = diferenca;
         novasParcelas[index].valor = valorInformado; 
         
@@ -350,7 +377,7 @@ app.patch('/api/vendas/:id/parcela/:numero', async (req, res) => {
           if (excesso >= valorDaProxima) { 
             excesso = parseFloat((excesso - valorDaProxima).toFixed(2)); 
             novasParcelas.splice(i, 1); 
-            i--; // Neste contexto o i-- é seguro, pois estamos num laço FOR
+            i--;
           } else { 
             novasParcelas[i].valor = parseFloat((valorDaProxima - excesso).toFixed(2)); 
             excesso = 0; 
@@ -360,7 +387,7 @@ app.patch('/api/vendas/:id/parcela/:numero', async (req, res) => {
         novasParcelas[index].paga = true; 
         novasParcelas[index].dataPagamento = dataPagamento;
         
-      } else if (diferenca < 0) { // Pagou a Menos
+      } else if (diferenca < 0) {
         const valorSobra = Math.abs(diferenca);
         novasParcelas[index].valor = valorInformado; 
         novasParcelas[index].paga = true; 
@@ -375,7 +402,7 @@ app.patch('/api/vendas/:id/parcela/:numero', async (req, res) => {
             observacao: `Restante da parc. ${numAtual}` 
         });
         
-      } else { // Pagou o valor Exato
+      } else {
         novasParcelas[index].valor = valorInformado; 
         novasParcelas[index].paga = true; 
         novasParcelas[index].dataPagamento = dataPagamento;
@@ -488,12 +515,22 @@ app.post('/api/frete', async (req, res) => {
 // ==========================================
 // 🤖 MOTOR DO WHATSAPP BLINDADO CONTRA LOOP
 // ==========================================
-async function inicializarWhatsApp() {
+// ✅ CORREÇÃO: parâmetro `forcar` permite iniciar mesmo sem sessão salva
+async function inicializarWhatsApp(forcar = false) {
   if (reconectando) return; // Trava número 1: Impede sobreposição
   reconectando = true;
 
   try {
     const registroSessao = await Configuracao.findOne({ chave: 'whatsapp_session_creds' });
+
+    // ✅ CORREÇÃO CRÍTICA: se não tem sessão e não foi forçado, NÃO tenta conectar
+    if (!forcar && (!registroSessao || !registroSessao.valor)) {
+      console.log('📵 Sem sessão salva. Bot aguardando ação do usuário (Painel Zap → Conectar).');
+      statusConexao = 'Aguardando configuração';
+      reconectando = false;
+      return;
+    }
+
     let credsCarregadas = null;
     if (registroSessao && registroSessao.valor) { 
       try { 
@@ -565,8 +602,31 @@ async function inicializarWhatsApp() {
   }
 }
 
-async function enviarMensagemTexto(jid, texto) { if (!whatsappClient) return; await whatsappClient.sendMessage(jid, { text: texto }); }
-async function validarNumeroWhatsApp(numeroPuro) { try { const [result] = await whatsappClient.onWhatsApp(`${numeroPuro}@s.whatsapp.net`); if (result && result.exists) return result.jid; return `${numeroPuro}@s.whatsapp.net`; } catch (e) { return `${numeroPuro}@s.whatsapp.net`; } }
+// ✅ CORREÇÃO: enviarMensagemTexto com guard clause e try/catch
+async function enviarMensagemTexto(jid, texto) { 
+  if (!whatsappClient || statusConexao !== 'Conectado') return; 
+  try {
+    await whatsappClient.sendMessage(jid, { text: texto }); 
+  } catch (e) {
+    console.error('Erro ao enviar msg WhatsApp:', e.message);
+  }
+}
+
+// ✅ CORREÇÃO: validarNumeroWhatsApp com timeout e guard clause
+async function validarNumeroWhatsApp(numeroPuro) { 
+  const fallbackJid = `${numeroPuro}@s.whatsapp.net`;
+  if (!whatsappClient || statusConexao !== 'Conectado') return fallbackJid;
+  try { 
+    const [result] = await Promise.race([
+      whatsappClient.onWhatsApp(fallbackJid),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
+    ]);
+    if (result && result.exists) return result.jid; 
+    return fallbackJid; 
+  } catch (e) { 
+    return fallbackJid; 
+  } 
+}
 
 async function verificarAniversariantesDoDia() {
   if (!whatsappClient || statusConexao !== 'Conectado') return;
