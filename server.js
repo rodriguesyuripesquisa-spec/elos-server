@@ -65,7 +65,7 @@ const FuncionarioSchema = new mongoose.Schema({
 const Funcionario = mongoose.model('Funcionario', FuncionarioSchema);
 
 const Cliente = mongoose.model('Cliente', {
-  nome: String, cpf: String, dataNascimento: String, telefone: String, email: String, endereco: String, observacoes: String, foto: String,
+  nome: String, cpf: String, dataNascimento: String, telefone: String, email: String, origem: String, endereco: String, observacoes: String, foto: String,
   senha: { type: String, default: "" }, tokenRecuperacao: { type: String, default: null }, tokenExpiraEm: { type: Date, default: null }
 });
 
