@@ -70,7 +70,9 @@ const Cliente = mongoose.model('Cliente', {
 });
 
 const Venda = mongoose.model('Venda', {
-  numeroPedido: Number, cliente: String, cpf: String, produto: String, itensCarrinho: Array, valorTotal: Number, valorEntrada: Number, desconto: Number, parcelas: Number, listaParcelas: Array, dataVenda: String, metodoPagamento: String, dataPrevisaoPagamento: String, observacoes: String, foto: String, dataPrimeiraParcela: String        
+  numeroPedido: Number, cliente: String, cpf: String, produto: String, itensCarrinho: Array, valorTotal: Number, valorEntrada: Number, desconto: Number, parcelas: Number, listaParcelas: Array, dataVenda: String, metodoPagamento: String, dataPrevisaoPagamento: String, observacoes: String, foto: String, dataPrimeiraParcela: String,
+  renegociada: { type: Boolean, default: false },
+  renegociadaEm: String
 });
 
 const Despesa = mongoose.model('Despesa', { descricao: String, valor: Number, categoria: String, vencimento: String, paga: Boolean });
