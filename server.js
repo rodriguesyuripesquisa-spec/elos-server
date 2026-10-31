@@ -84,7 +84,8 @@ const ProdutoSchema = new mongoose.Schema({
   quantidade: { type: Number, default: 0 },
   referencia: { type: String, default: "" },
   foto: { type: String, default: "" }, 
-  fotos: [{ type: String }] 
+  fotos: [{ type: String }],
+  descricao: { type: String, default: "" }
 });
 const Produto = mongoose.model('Produto', ProdutoSchema, 'produtos');
 
