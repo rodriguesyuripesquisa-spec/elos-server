@@ -1,3 +1,5 @@
+process.env.TZ = 'America/Fortaleza'; // 🟢 Força o servidor (local e Render) a usar o fuso horário de Fortaleza (-03:00)
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -20,6 +22,11 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 const MONGO_URI = process.env.MONGODB_URI; 
 
+// 🟢 FUNÇÃO AUXILIAR DE DATA EXATA NO FUSO DE FORTALEZA (YYYY-MM-DD)
+const obterDataHojeBR = () => {
+  return new Date().toLocaleDateString('sv-SE', { timeZone: 'America/Fortaleza' });
+};
+
 let whatsappClient = null;
 let statusConexao = 'Iniciando...';
 let qrCodeBase64 = null;
@@ -32,17 +39,15 @@ let tentativasConexao = 0;
 let reconectando = false; 
 
 // ============================================================
-// ✅ CORREÇÃO: Boot do Express em paralelo, WhatsApp em background
+// ✅ Boot do Express em paralelo, WhatsApp em background
 // ============================================================
 mongoose.connect(MONGO_URI)
   .then(() => {
     console.log("✅ Banco MongoDB da Ótica Elos Conectado!");
-    // Tarefas leves em background, sem bloquear
     atualizarVendasAntigas().catch(e => console.error('erro atualizarVendas:', e));
     inicializarMensagensPadrao().catch(e => console.error('erro msgs:', e));
     inicializarAdmin().catch(e => console.error('erro admin:', e));
 
-    // ✅ WhatsApp só inicia 60s depois, para não competir com o boot HTTP
     console.log("⏳ WhatsApp será iniciado em 60s (background)...");
     setTimeout(() => {
       console.log("🤖 Iniciando WhatsApp em background...");
@@ -69,14 +74,16 @@ const Cliente = mongoose.model('Cliente', {
   senha: { type: String, default: "" }, tokenRecuperacao: { type: String, default: null }, tokenExpiraEm: { type: Date, default: null }
 });
 
+// 🟢 Modelo Venda com suporte a dataEntrada e Renegociação de Dívidas
 const Venda = mongoose.model('Venda', {
-  numeroPedido: Number, cliente: String, cpf: String, produto: String, itensCarrinho: Array, valorTotal: Number, valorEntrada: Number, desconto: Number, parcelas: Number, listaParcelas: Array, dataVenda: String, metodoPagamento: String, dataPrevisaoPagamento: String, observacoes: String, foto: String, dataPrimeiraParcela: String,
+  numeroPedido: Number, cliente: String, cpf: String, produto: String, itensCarrinho: Array, valorTotal: Number, valorEntrada: Number, desconto: Number, parcelas: Number, listaParcelas: Array, dataVenda: String, dataEntrada: String, metodoPagamento: String, dataPrevisaoPagamento: String, observacoes: String, foto: String, dataPrimeiraParcela: String,
   renegociada: { type: Boolean, default: false },
   renegociadaEm: String
 });
 
 const Despesa = mongoose.model('Despesa', { descricao: String, valor: Number, categoria: String, vencimento: String, paga: Boolean });
 
+// 🟢 Modelo Produto com campo descricao
 const ProdutoSchema = new mongoose.Schema({
   nome: { type: String, required: true },
   preco: { type: Number, required: true },
@@ -103,18 +110,27 @@ const OrdemServico = mongoose.model('OrdemServico', {
   observacoes: String, consultor: String
 });
 
+// 🟢 Modelo Cupom com limite de uso (Padrão: 1) e controle de usos
 const CupomSchema = new mongoose.Schema({
   codigo: { type: String, required: true, uppercase: true, unique: true },
   tipo: { type: String, enum: ['PERCENTUAL', 'FIXO'], required: true },
   valor: { type: Number, required: true },
   dataFim: { type: Date, required: true },
+  limiteUso: { type: Number, default: 1 },
+  usosAtuais: { type: Number, default: 0 },
+  cpfsUtilizados: [{ type: String }],
   ativo: { type: Boolean, default: true }
 });
 const Cupom = mongoose.model('Cupom', CupomSchema);
 
 const PedidoOnlineSchema = new mongoose.Schema({
   numeroPedidoOnline: Number, clienteNome: String, clienteTelefone: String, clienteCpf: String, clienteEndereco: String,
-  itens: Array, valorTotal: Number, status: { type: String, default: 'AGUARDANDO_PAGAMENTO' }, dataPedido: { type: Date, default: Date.now }, infinitePayId: String
+  itens: Array,
+  subtotal: Number,         
+  descontoCupom: Number,   
+  valorTotal: Number, freteValor: Number, freteTipo: String, cupomUtilizado: String,
+  status: { type: String, default: 'AGUARDANDO_PAGAMENTO' },
+  dataPedido: { type: Date, default: Date.now }, infinitePayId: String
 });
 const PedidoOnline = mongoose.model('PedidoOnline', PedidoOnlineSchema);
 
@@ -148,6 +164,8 @@ const inicializarMensagensPadrao = async () => {
     if (!msgAniv) await new Configuracao({ chave: 'msg_aniversario', valor: "Olá, {nome}! 🎉 Feliz aniversário!" }).save();
     const msgPosVenda = await Configuracao.findOne({ chave: 'msg_pos_venda' });
     if (!msgPosVenda) await new Configuracao({ chave: 'msg_pos_venda', valor: "Olá, {nome}! Tudo bem? 😊" }).save();
+    const chavePix = await Configuracao.findOne({ chave: 'chave_pix_carne' });
+    if (!chavePix) await new Configuracao({ chave: 'chave_pix_carne', valor: "(85) 8550-6571" }).save();
   } catch (err) {}
 };
 
@@ -177,14 +195,12 @@ app.post('/api/whatsapp/desconectar', async (req, res) => {
     
     res.json({ success: true, message: 'Sessão encerrada e limpa.' });
     
-    // ✅ CORREÇÃO: forçar reconexão (true) para gerar novo QR Code
     setTimeout(() => { inicializarWhatsApp(true); }, 3000);
   } catch (error) { 
     res.status(500).json({ error: error.message }); 
   }
 });
 
-// ✅ CORREÇÃO: Nova rota para o usuário pedir conexão manualmente (gerar QR Code)
 app.post('/api/whatsapp/conectar', async (req, res) => {
   try {
     statusConexao = 'Iniciando...';
@@ -202,11 +218,13 @@ app.get('/api/whatsapp/mensagens', async (req, res) => {
   try { const configs = await Configuracao.find(); const mapa = {}; configs.forEach(c => mapa[c.chave] = c.valor); res.json(mapa); } 
   catch (err) { res.status(500).json({ error: "Erro" }); }
 });
+
 app.post('/api/whatsapp/mensagens', async (req, res) => {
   try {
-    const { msg_aniversario, msg_pos_venda } = req.body;
-    if (msg_aniversario) await Configuracao.updateOne({ chave: 'msg_aniversario' }, { valor: msg_aniversario }, { upsert: true });
-    if (msg_pos_venda) await Configuracao.updateOne({ chave: 'msg_pos_venda' }, { valor: msg_pos_venda }, { upsert: true });
+    const { msg_aniversario, msg_pos_venda, chave_pix_carne } = req.body;
+    if (msg_aniversario !== undefined) await Configuracao.updateOne({ chave: 'msg_aniversario' }, { valor: msg_aniversario }, { upsert: true });
+    if (msg_pos_venda !== undefined) await Configuracao.updateOne({ chave: 'msg_pos_venda' }, { valor: msg_pos_venda }, { upsert: true });
+    if (chave_pix_carne !== undefined) await Configuracao.updateOne({ chave: 'chave_pix_carne' }, { valor: chave_pix_carne }, { upsert: true });
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: "Erro" }); }
 });
@@ -226,18 +244,134 @@ app.post('/api/funcionarios', async (req, res) => { try { const dados = { ...req
 app.put('/api/funcionarios/:id', async (req, res) => { try { if (req.body.usuario) req.body.usuario = req.body.usuario.toLowerCase(); const func = await Funcionario.findByIdAndUpdate(req.params.id, req.body, { new: true }); res.json(func); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.delete('/api/funcionarios/:id', async (req, res) => { try { await Funcionario.findByIdAndDelete(req.params.id); res.json({ message: "Excluído." }); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 
+// ==========================================
+// 🎟️ ROTAS DE CUPONS (FUSO HORÁRIO E LIMITE DE USO CORRIGIDOS)
+// ==========================================
+
+const arred = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+const limparCpf = (c) => String(c || '').replace(/\D/g, '');
+
+class ErroNegocio extends Error {
+  constructor(msg, status = 400) { super(msg); this.status = status; }
+}
+
+// Tabela de frete no servidor (o navegador só diz QUAL opção escolheu)
+const FRETES = {
+  retirada: { nome: 'Retirar na Loja (Bela Vista)', valor: 0 },
+  motoboy:  { nome: 'Motoboy Fortaleza/Região', valor: 15.00 },
+  pac:      { nome: 'Correios PAC', valor: 28.90 },
+  sedex:    { nome: 'Correios Sedex', valor: 45.50 }
+};
+
+// Regras do cupom num lugar só (usado em /validar e no pedido)
+function verificarCupom(cupom, cpfLimpo) {
+  if (!cupom) return 'Cupom não encontrado.';
+  if (!cupom.ativo) return 'Este cupom está inativo.';
+  if (new Date() > new Date(cupom.dataFim)) return 'Este cupom já expirou.';   // dataFim já é 23:59:59-03:00
+  if ((cupom.usosAtuais || 0) >= (cupom.limiteUso ?? 1)) return 'Este cupom já atingiu o limite máximo de utilizações.';
+  if (cpfLimpo && (cupom.cpfsUtilizados || []).includes(cpfLimpo)) return 'Você já utilizou este cupom anteriormente.';
+  return null;
+}
+
+function precoPromocional(produto, promocoes) {
+  const regra = promocoes.find(p => p.nome === `PROMOCAO_${produto.categoria}`);
+  if (!regra) return null;
+  const v = Number(regra.preco);
+  const novo = regra.referencia === 'PERCENTUAL'
+    ? produto.preco - produto.preco * (v / 100)
+    : produto.preco - v;
+  return arred(Math.max(0, novo));
+}
+
+async function calcularPedido({ itens, cupomCodigo, cpf, freteId, cep }) {
+  if (!Array.isArray(itens) || itens.length === 0) throw new ErroNegocio('Carrinho vazio.');
+
+  const ids = [...new Set(itens.map(i => String(i?.id || i?._id)))];
+  if (ids.some(id => !mongoose.isValidObjectId(id))) throw new ErroNegocio('Item inválido no carrinho.');
+
+  const [produtos, promocoes] = await Promise.all([
+    Produto.find({ _id: { $in: ids } }).lean(),
+    Produto.find({ categoria: 'PROMO_CATE' }).lean()
+  ]);
+  if (produtos.length !== ids.length) throw new ErroNegocio('Um dos produtos não existe mais.');
+
+  let temPromo = false;
+  const temArmacao = produtos.some(p => p.categoria === 'ARMAÇÃO');
+
+  const itensFinais = produtos.map(p => {
+    if (['PROMO_CATE'].includes(p.categoria)) throw new ErroNegocio('Item inválido no carrinho.');
+    if (p.categoria === 'UPSELL' && !temArmacao) throw new ErroNegocio('A oferta combo exige uma armação no carrinho.');
+    if (p.quantidade <= 0 && p.categoria !== 'LENTE') throw new ErroNegocio(`"${p.nome}" está sem estoque.`);
+
+    let preco = Number(p.preco);
+    if (p.categoria === 'UPSELL') temPromo = true;
+    else {
+      const promo = precoPromocional(p, promocoes);
+      if (promo !== null && promo < preco) { preco = promo; temPromo = true; }
+    }
+    return { id: String(p._id), nome: p.nome, preco: arred(preco), referencia: p.referencia || '' };
+  });
+
+  const subtotal = arred(itensFinais.reduce((s, i) => s + i.preco, 0));
+
+  // Cupom
+  let cupomDoc = null, descontoCupom = 0;
+  const cpfLimpo = limparCpf(cpf);
+  if (cupomCodigo) {
+    if (temPromo) throw new ErroNegocio('Cupons não são cumulativos com itens em promoção.');
+    cupomDoc = await Cupom.findOne({ codigo: String(cupomCodigo).toUpperCase() });
+    const erro = verificarCupom(cupomDoc, cpfLimpo);
+    if (erro) throw new ErroNegocio(erro);
+    descontoCupom = cupomDoc.tipo === 'PERCENTUAL'
+      ? subtotal * (Number(cupomDoc.valor) / 100)
+      : Math.min(Number(cupomDoc.valor), subtotal);
+    descontoCupom = arred(descontoCupom);
+  }
+
+  // Frete
+  const frete = FRETES[freteId || 'retirada'];
+  if (!frete) throw new ErroNegocio('Opção de frete inválida.');
+  if (freteId === 'motoboy' && !['60','61'].includes(String(cep || '').replace(/\D/g, '').slice(0, 2)))
+  throw new ErroNegocio('Motoboy disponível apenas para Fortaleza e região.');
+
+  const valorTotal = arred(Math.max(0, subtotal - descontoCupom) + frete.valor);
+  return { itensFinais, subtotal, descontoCupom, valorTotal, frete, cupomDoc, cpfLimpo };
+}
+
 app.get('/api/cupons', async (req, res) => { try { res.json(await Cupom.find().sort({ dataFim: -1 })); } catch (err) { res.status(500).json({ error: "Erro" }); } });
-app.post('/api/cupons', async (req, res) => { try { const novoCupom = new Cupom(req.body); await novoCupom.save(); res.status(201).json(novoCupom); } catch (err) { res.status(500).json({ error: "Erro" }); } });
+
+app.post('/api/cupons', async (req, res) => { 
+  try { 
+    // 🟢 Salva a dataFim sempre às 23:59:59 do fuso de Fortaleza (-03:00)
+    const dataPura = String(req.body.dataFim).split('T')[0];
+    const dataFimAjustada = new Date(`${dataPura}T23:59:59-03:00`);
+
+    const dadosCupom = {
+      ...req.body,
+      dataFim: dataFimAjustada,
+      limiteUso: req.body.limiteUso !== undefined && req.body.limiteUso !== '' ? Number(req.body.limiteUso) : 1,
+      usosAtuais: 0,
+      cpfsUtilizados: []
+    };
+    const novoCupom = new Cupom(dadosCupom); 
+    await novoCupom.save(); 
+    res.status(201).json(novoCupom); 
+  } catch (err) { 
+    if (err.code === 11000) return res.status(400).json({ error: "Já existe um cupom com este código." });
+    res.status(500).json({ error: "Erro ao criar cupom." }); 
+  } 
+});
+
 app.put('/api/cupons/:id', async (req, res) => { try { const cupomEditado = await Cupom.findByIdAndUpdate(req.params.id, req.body, { new: true }); res.json(cupomEditado); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.delete('/api/cupons/:id', async (req, res) => { try { await Cupom.findByIdAndDelete(req.params.id); res.json({ message: "Excluído" }); } catch (err) { res.status(500).json({ error: "Erro" }); } });
-app.get('/api/cupons/validar/:codigo', async (req, res) => {
+
+aapp.get('/api/cupons/validar/:codigo', async (req, res) => {
   try {
     const cupom = await Cupom.findOne({ codigo: req.params.codigo.toUpperCase() });
-    if (!cupom) return res.status(404).json({ valido: false, error: "Cupom não encontrado." });
-    if (!cupom.ativo) return res.status(400).json({ valido: false, error: "Este cupom está inativo." });
-    if (new Date() > new Date(cupom.dataFim)) return res.status(400).json({ valido: false, error: "Este cupom já expirou." });
+    const erro = verificarCupom(cupom, limparCpf(req.query.cpf));
+    if (erro) return res.status(erro.includes('não encontrado') ? 404 : 400).json({ valido: false, error: erro });
     res.json({ valido: true, cupom });
-  } catch (err) { res.status(500).json({ error: "Erro" }); }
+  } catch (err) { res.status(500).json({ error: 'Erro' }); }
 });
 
 app.get('/api/clientes', async (req, res) => res.json(await Cliente.find().sort({ nome: 1 })));
@@ -247,7 +381,6 @@ app.post('/api/clientes', async (req, res) => {
   try {
     const novoCliente = new Cliente(req.body);
     await novoCliente.save();
-    // ✅ CORREÇÃO: WhatsApp fire-and-forget, não bloqueia a resposta HTTP
     if (novoCliente.telefone) {
       let num = novoCliente.telefone.replace(/\D/g, ''); 
       if (!num.startsWith('55')) num = `55${num}`;
@@ -334,7 +467,7 @@ app.delete('/api/ordens_servico/:id', async (req, res) => { try { await OrdemSer
 
 
 // =========================================================================
-// 🟢 ROTA DE PARCELAS BLINDADA (Correção do Erro 500 no Estorno)
+// 🟢 ROTA DE PARCELAS BLINDADA
 // =========================================================================
 app.patch('/api/vendas/:id/parcela/:numero', async (req, res) => {
   try {
@@ -432,7 +565,7 @@ app.delete('/api/despesas/:id', async (req, res) => { try { await Despesa.findBy
 
 app.get('/api/produtos', async (req, res) => {
   try {
-    const listaProdutos = await Produto.find({}).select('nome preco categoria quantidade referencia foto fotos').lean().sort({ nome: 1 });
+    const listaProdutos = await Produto.find({}).select('nome preco categoria quantidade referencia foto fotos descricao').lean().sort({ nome: 1 });
     res.json(listaProdutos);
   } catch (err) {
     res.status(500).json({ error: "Falha ao buscar", detalhes: err.message });
@@ -443,33 +576,124 @@ app.put('/api/produtos/:id', async (req, res) => { try { res.json(await Produto.
 app.delete('/api/produtos/:id', async (req, res) => { try { await Produto.findByIdAndDelete(req.params.id); res.json({ message: "Removido" }); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 
 app.get('/api/pedidos_online', async (req, res) => { try { const pedidos = await PedidoOnline.find().sort({ dataPedido: -1 }); res.json(pedidos); } catch (err) { res.status(500).json({ error: "Erro" }); } });
+
 app.post('/api/pedidos_online', async (req, res) => {
+  let cupomConsumido = null;
   try {
-    const ultimoPedido = await PedidoOnline.findOne().sort({ numeroPedidoOnline: -1 });
-    const proximoNumeroOnline = ultimoPedido && ultimoPedido.numeroPedidoOnline ? ultimoPedido.numeroPedidoOnline + 1 : 1000;
-    const novoPedido = new PedidoOnline({ ...req.body, numeroPedidoOnline: proximoNumeroOnline });
-    await novoPedido.save(); res.json({ success: true, pedido: novoPedido });
-  } catch (err) { res.status(500).json({ error: "Erro" }); }
+    const { clienteNome, clienteTelefone, clienteCpf, clienteEndereco, itens, cupomUtilizado, freteId, cep } = req.body;
+
+    if (!clienteNome || !clienteTelefone || !clienteCpf) return res.status(400).json({ error: 'Dados do cliente incompletos.' });
+
+    const calc = await calcularPedido({ itens, cupomCodigo: cupomUtilizado, cpf: clienteCpf, freteId, cep });
+
+    // Consome o cupom de forma ATÔMICA (evita uso duplo em requisições simultâneas)
+    if (calc.cupomDoc) {
+      const atualizado = await Cupom.findOneAndUpdate(
+        {
+          _id: calc.cupomDoc._id,
+          ativo: true,
+          dataFim: { $gte: new Date() },
+          $expr: { $lt: ['$usosAtuais', { $ifNull: ['$limiteUso', 1] }] },
+          ...(calc.cpfLimpo ? { cpfsUtilizados: { $ne: calc.cpfLimpo } } : {})
+        },
+        {
+          $inc: { usosAtuais: 1 },
+          ...(calc.cpfLimpo ? { $addToSet: { cpfsUtilizados: calc.cpfLimpo } } : {})
+        },
+        { new: true }
+      );
+      if (!atualizado) throw new ErroNegocio('Este cupom não está mais disponível.');
+      cupomConsumido = atualizado;
+      if (atualizado.usosAtuais >= (atualizado.limiteUso ?? 1)) {
+        await Cupom.updateOne({ _id: atualizado._id }, { ativo: false });
+      }
+    }
+
+    const ultimo = await PedidoOnline.findOne().sort({ numeroPedidoOnline: -1 });
+    const proximoNumero = ultimo && ultimo.numeroPedidoOnline ? ultimo.numeroPedidoOnline + 1 : 1000;
+
+    const novoPedido = await new PedidoOnline({
+      numeroPedidoOnline: proximoNumero,
+      clienteNome: String(clienteNome).toUpperCase(),
+      clienteTelefone, clienteCpf, clienteEndereco,
+      itens: calc.itensFinais,
+      subtotal: calc.subtotal,
+      descontoCupom: calc.descontoCupom,
+      valorTotal: calc.valorTotal,
+      freteValor: calc.frete.valor,
+      freteTipo: calc.frete.nome,
+      cupomUtilizado: calc.cupomDoc ? calc.cupomDoc.codigo : undefined
+    }).save();
+
+    res.json({ success: true, pedido: novoPedido });
+  } catch (err) {
+    // Se o pedido falhou depois de gastar o cupom, devolve o uso
+    if (cupomConsumido) {
+      await Cupom.updateOne(
+        { _id: cupomConsumido._id },
+        { $inc: { usosAtuais: -1 }, $pull: { cpfsUtilizados: limparCpf(req.body.clienteCpf) }, $set: { ativo: true } }
+      ).catch(() => {});
+    }
+    if (err instanceof ErroNegocio) return res.status(err.status).json({ error: err.message });
+    console.error('Erro ao criar pedido:', err);
+    res.status(500).json({ error: 'Erro ao criar pedido.' });
+  }
 });
+
 app.patch('/api/pedidos_online/:id/status', async (req, res) => {
   try {
     const { status } = req.body;
     const pedidoAnterior = await PedidoOnline.findById(req.params.id);
-    if (status === 'CANCELADO') { await PedidoOnline.findByIdAndDelete(req.params.id); return res.json({ message: "Excluído." }); }
+    if (!pedidoAnterior) return res.status(404).json({ error: 'Pedido não encontrado.' });
 
-    const pedidoAtualizado = await PedidoOnline.findByIdAndUpdate(req.params.id, { status }, { new: true });
+    if (status === 'CANCELADO') {
+      if (pedidoAnterior.cupomUtilizado && pedidoAnterior.status !== 'CONCLUIDO') {
+        await Cupom.updateOne(
+          { codigo: pedidoAnterior.cupomUtilizado },
+          {
+            $inc: { usosAtuais: -1 },
+            $pull: { cpfsUtilizados: limparCpf(pedidoAnterior.clienteCpf) },
+            $set: { ativo: true }
+          }
+        );
+      }
+      await PedidoOnline.findByIdAndDelete(req.params.id);
+      return res.json({ message: 'Excluído.' });
+    }
 
     if (status === 'CONCLUIDO' && pedidoAnterior.status !== 'CONCLUIDO') {
       let clienteExiste = await Cliente.findOne({ cpf: pedidoAtualizado.clienteCpf });
-      if (!clienteExiste) { clienteExiste = new Cliente({ nome: pedidoAtualizado.clienteNome, cpf: pedidoAtualizado.clienteCpf, telefone: pedidoAtualizado.clienteTelefone, endereco: pedidoAtualizado.clienteEndereco || '', observacoes: 'Cliente via Loja Virtual.' }); await clienteExiste.save(); }
+      if (!clienteExiste) { 
+        clienteExiste = new Cliente({ 
+          nome: pedidoAtualizado.clienteNome, 
+          cpf: pedidoAtualizado.clienteCpf, 
+          telefone: pedidoAtualizado.clienteTelefone, 
+          origem: 'Site / Loja Virtual',
+          endereco: pedidoAtualizado.clienteEndereco || '', 
+          observacoes: 'Cliente via Loja Virtual.' 
+        }); 
+        await clienteExiste.save(); 
+      }
 
       const ultimaVenda = await Venda.findOne().sort({ numeroPedido: -1 });
       const proximoNumero = ultimaVenda && ultimaVenda.numeroPedido ? ultimaVenda.numeroPedido + 1 : 2000;
+      const hojeBR = obterDataHojeBR(); // 🟢 Data exata de Fortaleza
 
       const novaVendaOficial = new Venda({
-        numeroPedido: proximoNumero, cliente: pedidoAtualizado.clienteNome, cpf: pedidoAtualizado.clienteCpf, produto: "Compra Online - " + pedidoAtualizado.itens.map(i => i.nome).join(', '), itensCarrinho: pedidoAtualizado.itens, valorTotal: pedidoAtualizado.valorTotal, valorEntrada: pedidoAtualizado.valorTotal, desconto: 0, parcelas: 1,
-        listaParcelas: [{ numero: 1, valor: pedidoAtualizado.valorTotal, dataVencimento: new Date().toISOString().split('T')[0], paga: true, dataPagamento: new Date().toISOString().split('T')[0], observacao: "Pago via Site" }],
-        dataVenda: new Date().toISOString().split('T')[0], metodoPagamento: 'Pagamento Digital (Site)', observacoes: `Origem: Pedido Online #${pedidoAtualizado.numeroPedidoOnline}`
+        numeroPedido: proximoNumero, 
+        cliente: pedidoAtualizado.clienteNome, 
+        cpf: pedidoAtualizado.clienteCpf, 
+        produto: "Compra Online - " + pedidoAtualizado.itens.map(i => i.nome).join(', '), 
+        itensCarrinho: pedidoAtualizado.itens, 
+        valorTotal: pedidoAtualizado.valorTotal, 
+        valorEntrada: pedidoAtualizado.valorTotal, 
+        desconto: 0, 
+        parcelas: 1,
+        listaParcelas: [{ numero: 1, valor: pedidoAtualizado.valorTotal, dataVencimento: hojeBR, paga: true, dataPagamento: hojeBR, observacao: "Pago via Site" }],
+        dataVenda: hojeBR, 
+        dataEntrada: hojeBR,
+        metodoPagamento: 'Pagamento Digital (Site)', 
+        observacoes: `Origem: Pedido Online #${pedidoAtualizado.numeroPedidoOnline} | Entrega: ${pedidoAtualizado.freteTipo || 'Padrão'}`
       });
       await novaVendaOficial.save();
     }
@@ -489,11 +713,12 @@ app.post('/api/frete', async (req, res) => {
     const sedexReq = fetch(`https://brasilapi.com.br/api/correios/v1/frete/preco?sCepOrigem=${cepOrigem}&sCepDestino=${cepDestinoLimpo}&nVlPeso=0.3&nCdFormato=1&nVlComprimento=16&nVlAltura=11&nVlLargura=11&nCdServico=04014`);
 
     const [pacRes, sedexRes] = await Promise.all([pacReq, sedexReq]);
-    const opcoes = [];
+    const opcoes = [
+      { id: 'retirada', nome: 'Retirar na Loja (Bela Vista)', valor: 0.00, prazo: 'Imediato' }
+    ];
     
     const prefixo = cepDestinoLimpo.substring(0, 2);
     if (['60', '61', '62', '63'].includes(prefixo)) {
-      opcoes.push({ id: 'retirada', nome: 'Retirar na Loja (Bela Vista)', valor: 0.00, prazo: 'Imediato' });
       opcoes.push({ id: 'motoboy', nome: 'Motoboy Fortaleza/Região', valor: 15.00, prazo: '1 dia útil' });
     }
 
@@ -506,7 +731,7 @@ app.post('/api/frete', async (req, res) => {
       opcoes.push({ id: 'sedex', nome: 'Correios Sedex', valor: Number(sedexData[0].Valor.replace(',', '.')), prazo: `${sedexData[0].PrazoEntrega} dias úteis` });
     }
 
-    if (opcoes.length === 0 || (opcoes.length === 2 && opcoes[0].id === 'retirada')) {
+    if (!opcoes.some(o => o.id === 'pac')) {
        opcoes.push({ id: 'pac', nome: 'Correios PAC', valor: 28.90, prazo: '5 a 8 dias úteis' });
        opcoes.push({ id: 'sedex', nome: 'Correios Sedex', valor: 45.50, prazo: '2 a 3 dias úteis' });
     }
@@ -518,15 +743,13 @@ app.post('/api/frete', async (req, res) => {
 // ==========================================
 // 🤖 MOTOR DO WHATSAPP BLINDADO CONTRA LOOP
 // ==========================================
-// ✅ CORREÇÃO: parâmetro `forcar` permite iniciar mesmo sem sessão salva
 async function inicializarWhatsApp(forcar = false) {
-  if (reconectando) return; // Trava número 1: Impede sobreposição
+  if (reconectando) return;
   reconectando = true;
 
   try {
     const registroSessao = await Configuracao.findOne({ chave: 'whatsapp_session_creds' });
 
-    // ✅ CORREÇÃO CRÍTICA: se não tem sessão e não foi forçado, NÃO tenta conectar
     if (!forcar && (!registroSessao || !registroSessao.valor)) {
       console.log('📵 Sem sessão salva. Bot aguardando ação do usuário (Painel Zap → Conectar).');
       statusConexao = 'Aguardando configuração';
@@ -582,7 +805,6 @@ async function inicializarWhatsApp(forcar = false) {
           tentativasConexao = 0; 
           statusConexao = 'Erro ao conectar';
           console.log("⏸️ O bot pausou as tentativas. Use o botão no Painel Zap para reiniciar.");
-          
           return; 
         } 
         
@@ -605,7 +827,6 @@ async function inicializarWhatsApp(forcar = false) {
   }
 }
 
-// ✅ CORREÇÃO: enviarMensagemTexto com guard clause e try/catch
 async function enviarMensagemTexto(jid, texto) { 
   if (!whatsappClient || statusConexao !== 'Conectado') return; 
   try {
@@ -615,7 +836,6 @@ async function enviarMensagemTexto(jid, texto) {
   }
 }
 
-// ✅ CORREÇÃO: validarNumeroWhatsApp com timeout e guard clause
 async function validarNumeroWhatsApp(numeroPuro) { 
   const fallbackJid = `${numeroPuro}@s.whatsapp.net`;
   if (!whatsappClient || statusConexao !== 'Conectado') return fallbackJid;
@@ -633,9 +853,14 @@ async function validarNumeroWhatsApp(numeroPuro) {
 
 async function verificarAniversariantesDoDia() {
   if (!whatsappClient || statusConexao !== 'Conectado') return;
-  const hoje = new Date(); const mesHoje = String(hoje.getMonth() + 1).padStart(2, '0'); const diaHoje = String(hoje.getDate()).padStart(2, '0'); const hojeDataCompleta = `${hoje.getFullYear()}-${mesHoje}-${diaHoje}`;
+  const hojeDataCompleta = obterDataHojeBR(); // 🟢 YYYY-MM-DD local de Fortaleza
+  const [, mesHoje, diaHoje] = hojeDataCompleta.split('-');
 
-  if (dataUltimaVerificacaoJanela !== hojeDataCompleta) { idsAniversariantesEnviadosHoje = []; idsPosVendaEnviadosHoje = []; dataUltimaVerificacaoJanela = hojeDataCompleta; }
+  if (dataUltimaVerificacaoJanela !== hojeDataCompleta) { 
+    idsAniversariantesEnviadosHoje = []; 
+    idsPosVendaEnviadosHoje = []; 
+    dataUltimaVerificacaoJanela = hojeDataCompleta; 
+  }
   try {
     const aniversariantes = await Cliente.find({ dataNascimento: new RegExp(`^\\d{4}-${mesHoje}-${diaHoje}$`) });
     const pendentes = aniversariantes.filter(c => !idsAniversariantesEnviadosHoje.includes(String(c._id)));
@@ -656,7 +881,9 @@ async function verificarAniversariantesDoDia() {
 
 async function verificarPosVendaTrintaDias() {
   if (!whatsappClient || statusConexao !== 'Conectado') return;
-  const data = new Date(); data.setDate(data.getDate() - 30); const dataAlvoStr = data.toISOString().split('T')[0];
+  const data = new Date(); 
+  data.setDate(data.getDate() - 30); 
+  const dataAlvoStr = data.toLocaleDateString('sv-SE', { timeZone: 'America/Fortaleza' }); // 🟢 30 dias atrás no fuso local
 
   try {
     const vendas = await Venda.find({ dataVenda: dataAlvoStr });
@@ -679,4 +906,4 @@ async function verificarPosVendaTrintaDias() {
 setInterval(() => { verificarAniversariantesDoDia(); verificarPosVendaTrintaDias(); }, 1000 * 60 * 60);
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Servidor rodando na porta ${PORT} (Modo Economia Ativado)`));
+app.listen(PORT, () => console.log(`🚀 Servidor rodando na porta ${PORT} (Fuso: America/Fortaleza)`));
