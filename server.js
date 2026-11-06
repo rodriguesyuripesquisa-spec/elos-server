@@ -575,7 +575,38 @@ app.post('/api/produtos', async (req, res) => res.json(await new Produto(req.bod
 app.put('/api/produtos/:id', async (req, res) => { try { res.json(await Produto.findByIdAndUpdate(req.params.id, req.body, { new: true })); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.delete('/api/produtos/:id', async (req, res) => { try { await Produto.findByIdAndDelete(req.params.id); res.json({ message: "Removido" }); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 
-app.get('/api/pedidos_online', async (req, res) => { try { const pedidos = await PedidoOnline.find().sort({ dataPedido: -1 }); res.json(pedidos); } catch (err) { res.status(500).json({ error: "Erro" }); } });
+app.get('/api/pedidos_online', async (req, res) => { 
+  try { 
+    const pedidos = await PedidoOnline.find().sort({ dataPedido: -1 }); 
+    res.json(pedidos); 
+  } catch (err) { 
+    res.status(500).json({ error: "Erro" }); 
+  } 
+});
+
+// 🟢 NOVA ROTA: Ponte (Proxy) para evitar erro de CORS ao chamar a InfinitePay pelo navegador
+app.post('/api/infinitepay/checkout', async (req, res) => {
+  try {
+    const resposta = await fetch('https://api.checkout.infinitepay.io/links', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        ...(req.headers.authorization ? { 'Authorization': req.headers.authorization } : {})
+      },
+      body: JSON.stringify(req.body)
+    });
+
+    const dados = await resposta.json().catch(() => ({}));
+    if (!resposta.ok) {
+      return res.status(resposta.status).json(dados);
+    }
+    res.json(dados);
+  } catch (err) {
+    console.error('Erro ao comunicar com InfinitePay:', err);
+    res.status(500).json({ error: 'Falha ao gerar link de pagamento na InfinitePay.' });
+  }
+});
 
 app.post('/api/pedidos_online', async (req, res) => {
   let cupomConsumido = null;
@@ -640,6 +671,7 @@ app.post('/api/pedidos_online', async (req, res) => {
   }
 });
 
+// 🟢 ROTA DE STATUS CORRIGIDA (Adicionado o findByIdAndUpdate que estava faltando!)
 app.patch('/api/pedidos_online/:id/status', async (req, res) => {
   try {
     const { status } = req.body;
@@ -660,6 +692,13 @@ app.patch('/api/pedidos_online/:id/status', async (req, res) => {
       await PedidoOnline.findByIdAndDelete(req.params.id);
       return res.json({ message: 'Excluído.' });
     }
+
+    // 🟢 Atualiza o status no banco e cria a variável pedidoAtualizado
+    const pedidoAtualizado = await PedidoOnline.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      { new: true }
+    );
 
     if (status === 'CONCLUIDO' && pedidoAnterior.status !== 'CONCLUIDO') {
       let clienteExiste = await Cliente.findOne({ cpf: pedidoAtualizado.clienteCpf });
@@ -698,7 +737,10 @@ app.patch('/api/pedidos_online/:id/status', async (req, res) => {
       await novaVendaOficial.save();
     }
     res.json(pedidoAtualizado);
-  } catch (err) { res.status(500).json({ error: "Erro" }); }
+  } catch (err) { 
+    console.error("Erro ao atualizar status do pedido:", err);
+    res.status(500).json({ error: "Erro" }); 
+  }
 });
 
 app.post('/api/frete', async (req, res) => {
