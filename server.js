@@ -365,7 +365,7 @@ app.post('/api/cupons', async (req, res) => {
 app.put('/api/cupons/:id', async (req, res) => { try { const cupomEditado = await Cupom.findByIdAndUpdate(req.params.id, req.body, { new: true }); res.json(cupomEditado); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 app.delete('/api/cupons/:id', async (req, res) => { try { await Cupom.findByIdAndDelete(req.params.id); res.json({ message: "Excluído" }); } catch (err) { res.status(500).json({ error: "Erro" }); } });
 
-aapp.get('/api/cupons/validar/:codigo', async (req, res) => {
+app.get('/api/cupons/validar/:codigo', async (req, res) => {
   try {
     const cupom = await Cupom.findOne({ codigo: req.params.codigo.toUpperCase() });
     const erro = verificarCupom(cupom, limparCpf(req.query.cpf));
