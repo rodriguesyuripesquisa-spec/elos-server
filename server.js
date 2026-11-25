@@ -246,6 +246,32 @@ function exigirEquipe(cargosPermitidos = ['ADMIN', 'VENDEDOR']) {
   };
 }
 
+// 🟢 Retorna os dados do cliente (sem senha) + token JWT exclusivo de cliente
+const comTokenCliente = (c) => {
+  const limpo = semSegredos(c);
+  const token = assinarToken({
+    id: String(limpo._id),
+    cpf: limparCpf(limpo.cpf),
+    tipo: 'CLIENTE'
+  });
+  return { ...limpo, token };
+};
+
+// 🟢 Middleware exclusivo para rotas da área do cliente
+function exigirCliente(req, res, next) {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  if (!token) {
+    return res.status(401).json({ error: 'Faça login para acessar seus pedidos.' });
+  }
+  const dados = verificarToken(token);
+  if (!dados || dados.tipo !== 'CLIENTE' || !dados.cpf) {
+    return res.status(401).json({ error: 'Sessão expirada. Faça login novamente.' });
+  }
+  req.cliente = dados;
+  return next();
+}
+
 // Limitador simples de tentativas (em memória)
 const tentativasRecentes = new Map();
 function limitar(chave, max = 8, janelaMs = 15 * 60 * 1000) {
@@ -771,7 +797,7 @@ app.post('/api/clientes/login', async (req, res) => {
     }
 
     liberarLimite(chaveLogin);
-    res.json(semSegredos(cliente));
+    res.json(comTokenCliente(cliente));
   } catch (err) {
     console.error('Erro no login de cliente:', err);
     res.status(500).json({ error: 'Erro no servidor.' });
@@ -831,7 +857,7 @@ app.post('/api/clientes/ativar-conta', async (req, res) => {
     await cliente.save();
 
     liberarLimite(`ativar:${digitos}`);
-    res.json(semSegredos(cliente));
+    res.json(comTokenCliente(cliente));
   } catch (err) {
     console.error('Erro ao ativar conta:', err);
     res.status(500).json({ error: 'Erro no servidor.' });
@@ -881,7 +907,7 @@ app.post('/api/clientes/cadastro-online', async (req, res) => {
       }
     } catch (e) { /* boas-vindas é opcional */ }
 
-    res.status(201).json(semSegredos(novo));
+    res.status(201).json(comTokenCliente(novo));
   } catch (err) {
     console.error('Erro no cadastro online:', err);
     res.status(500).json({ error: 'Erro no servidor.' });
@@ -1100,7 +1126,6 @@ app.patch('/api/vendas/:id/parcela/:numero', exigirEquipe(['ADMIN', 'VENDEDOR'])
     if (paga === false) {
       const proximoInteiro = Math.floor(numAtual) + 1;
       const esperado = Number((numAtual + (proximoInteiro - numAtual) / 2).toFixed(4));
-      // Localiza parcela filha residual (por observação ou pelo número calculado)
       const parcelaFilhaIndex = novasParcelas.findIndex(p =>
         !p.paga &&
         !p.renegociada &&
@@ -1223,7 +1248,7 @@ app.delete('/api/produtos/:id', exigirEquipe(['ADMIN', 'VENDEDOR']), async (req,
 });
 
 // ==========================================
-// 🛒 PEDIDOS ONLINE
+// 🛒 PEDIDOS ONLINE (ADMIN + ÁREA DO CLIENTE)
 // ==========================================
 app.get('/api/pedidos_online', exigirEquipe(['ADMIN']), async (req, res) => {
   try {
@@ -1231,6 +1256,56 @@ app.get('/api/pedidos_online', exigirEquipe(['ADMIN']), async (req, res) => {
     res.json(pedidos);
   } catch (err) {
     res.status(500).json({ error: 'Erro' });
+  }
+});
+
+// 🟢 Área do Cliente: lista APENAS os pedidos do CPF autenticado no token
+app.get('/api/meus-pedidos', exigirCliente, async (req, res) => {
+  try {
+    const digitos = req.cliente.cpf;
+    const filtroCpf = digitos.length === 11
+      ? { $in: [digitos, formatarCpf(digitos)] }
+      : digitos;
+
+    const pedidos = await PedidoOnline.find({ clienteCpf: filtroCpf }).sort({ dataPedido: -1 });
+    res.json(pedidos);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao buscar seus pedidos.' });
+  }
+});
+
+// 🟢 Área do Cliente: cancela APENAS pedido próprio e que ainda esteja aguardando pagamento
+app.patch('/api/meus-pedidos/:id/cancelar', exigirCliente, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: 'Pedido inválido.' });
+    }
+
+    const pedido = await PedidoOnline.findById(req.params.id);
+    if (!pedido) return res.status(404).json({ error: 'Pedido não encontrado.' });
+
+    if (limparCpf(pedido.clienteCpf) !== req.cliente.cpf) {
+      return res.status(403).json({ error: 'Você não tem permissão para cancelar este pedido.' });
+    }
+
+    if (pedido.status !== 'AGUARDANDO_PAGAMENTO') {
+      return res.status(400).json({
+        error: 'Apenas pedidos aguardando pagamento podem ser cancelados pelo site. Entre em contato pelo WhatsApp.'
+      });
+    }
+
+    if (pedido.cupomUtilizado) {
+      await devolverUsoCupom({ codigo: pedido.cupomUtilizado }, req.cliente.cpf);
+    }
+    if (pedido.estoqueBaixado) {
+      await ajustarEstoquePedido(pedido.itens, +1);
+    }
+
+    await PedidoOnline.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: 'Pedido cancelado com sucesso.' });
+  } catch (err) {
+    console.error('Erro ao cancelar pedido do cliente:', err);
+    res.status(500).json({ error: 'Erro ao cancelar pedido.' });
   }
 });
 
@@ -1471,10 +1546,13 @@ async function usarMongoAuthState() {
     }
   }
 
+  const temSessao = !!creds;
+  const credsAtuais = creds || initAuthCreds();
+
   return {
-    temSessao: !!creds,
+    temSessao,
     state: {
-      creds: creds || initAuthCreds(),
+      creds: credsAtuais,
       keys: {
         get: async (type, ids) => {
           const resultado = {};
@@ -1501,11 +1579,9 @@ async function usarMongoAuthState() {
         }
       }
     },
-    saveCreds: async () => { await escrever('creds', creds || stateRef.creds); }
+    saveCreds: async () => { await escrever('creds', credsAtuais); }
   };
 }
-
-let stateRef = null;
 
 async function inicializarWhatsApp(forcar = false) {
   if (reconectando) return;
@@ -1513,7 +1589,6 @@ async function inicializarWhatsApp(forcar = false) {
 
   try {
     const { temSessao, state, saveCreds } = await usarMongoAuthState();
-    stateRef = state;
 
     if (!forcar && !temSessao) {
       console.log('📵 Sem sessão salva. Bot aguardando ação do usuário (Painel Zap → Conectar).');
