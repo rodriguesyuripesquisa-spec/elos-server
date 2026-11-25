@@ -126,7 +126,7 @@ const OrdemServico = mongoose.model('OrdemServico', {
   perto_od_esf: String, perto_od_cil: String, perto_od_eixo: String, perto_od_dnp: String,
   perto_oe_esf: String, perto_oe_cil: String, perto_oe_eixo: String, perto_oe_dnp: String,
   medidas_vertical: String, medidas_horizontal: String, medidas_ponte: String, medidas_diag: String,
-  observacoes: String, consultor: String
+  observacoes: String, consultor: String, cliente: String
 });
 
 // 🟢 Modelo Cupom com limite de uso (Padrão: 1) e controle de usos
